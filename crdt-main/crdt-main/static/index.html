@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+
+<body>
+  <textarea id="input" placeholder="Type message" autocomplete="off" rows="10" cols="50"></textarea>
+  <ul id="log"></ul>
+
+  <script>
+    const ws = new WebSocket("ws://localhost:8080/ws");
+
+    let lastValue = "";
+    let cursorPosition = 0;
+    let positionToID = []; // Maps positions to element IDs
+
+    ws.onopen = () => {
+      log("Connected to the server!");
+    };
+
+    ws.onmessage = (e) => {
+      try {
+        const message = JSON.parse(e.data);
+
+        if (Array.isArray(message) && message.length > 0 && typeof message[0] === "object") {
+          // New format: [{ id: "...", value: "..." }]
+          const documentText = message.map(m => m.value).join("");
+          lastValue = documentText;
+          positionToID = message.map(m => m.id);
+
+          const inputEl = document.getElementById("input");
+          inputEl.value = documentText;
+
+          // Restore the cursor position
+          inputEl.selectionStart = cursorPosition;
+          inputEl.selectionEnd = cursorPosition;
+        } else {
+          if (message == null) {
+            const inputEl = document.getElementById("input");
+            inputEl.value = "";
+            lastValue = "";
+            positionToID = [];
+          }
+          log("Server (non-document message): " + e.data);
+        }
+      } catch (err) {
+        console.error("Error handling message:", err);
+      }
+    };
+
+    ws.onclose = () => {
+      log("Disconnected from the server!");
+    };
+
+    const sendOp = (type, after, id, value) => {
+      const msg = { type, after, id, value, timestamp: new Date().toISOString() };
+      ws.send(JSON.stringify(msg));
+    };
+
+    const inputEl = document.getElementById("input");
+
+    inputEl.addEventListener("select", (e) => {
+      cursorPosition = e.target.selectionStart;
+    });
+
+    inputEl.addEventListener("input", (e) => {
+      const currentValue = e.target.value;
+
+      const minLen = Math.min(lastValue.length, currentValue.length);
+      let changeIndex = 0;
+
+      // Find where change started
+      while (
+        changeIndex < minLen &&
+        lastValue[changeIndex] === currentValue[changeIndex]
+      ) {
+        changeIndex++;
+      }
+
+      const selectionStart = inputEl.selectionStart;
+      const selectionEnd = inputEl.selectionEnd;
+
+      if (selectionStart !== selectionEnd) {
+        // Handle selection replacement (delete + insert)
+        // Delete the selected range
+        for (let i = selectionStart; i <= selectionEnd; i++) {
+          const deletedID = positionToID[selectionStart];
+          if (deletedID) {
+            sendOp("Delete", null, deletedID, null);
+            positionToID.splice(selectionStart, 1);
+          }
+        }
+
+        // Insert the new characters
+        const inserted = currentValue.slice(selectionStart, selectionEnd);
+        for (let i = 0; i <= inserted.length; i++) {
+          const char = inserted[i];
+          const insertPos = selectionStart + i;
+          const afterID = insertPos === 0 ? "head" : positionToID[insertPos - 1] || "head";
+          const newID = `client:${Date.now()}-${i}`;
+          sendOp("Insert", afterID, newID, char);
+          positionToID.splice(insertPos, 0, newID);
+        }
+      } else {
+        // Handle normal insertion or deletion
+        if (currentValue.length > lastValue.length) {
+          // Insert
+          const inserted = currentValue.slice(changeIndex, currentValue.length - (lastValue.length - changeIndex));
+          for (let i = 0; i < inserted.length; i++) {
+            const char = inserted[i];
+            const insertPos = changeIndex + i;
+            const afterID = insertPos === 0 ? "head" : positionToID[insertPos - 1] || "head";
+            const newID = `client:${Date.now()}-${i}`;
+            sendOp("Insert", afterID, newID, char);
+            positionToID.splice(insertPos, 0, newID);
+          }
+        } else if (currentValue.length < lastValue.length) {
+          // Delete
+          const deleteCount = lastValue.length - currentValue.length;
+          for (let i = 0; i < deleteCount; i++) {
+            const deletePos = changeIndex;
+            const deletedID = positionToID[deletePos];
+            if (deletedID) {
+              sendOp("Delete", null, deletedID, null);
+              positionToID.splice(deletePos, 1);
+            }
+          }
+        }
+      }
+
+      lastValue = currentValue;
+      cursorPosition = inputEl.selectionStart;
+    });
+
+    function log(text) {
+      const li = document.createElement("li");
+      li.textContent = text;
+      document.getElementById("log").appendChild(li);
+    }
+  </script>
+</body>
+
+</html>
